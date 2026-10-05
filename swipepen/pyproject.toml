@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swipepen"
+version = "0.5.3"
+description = "Swipe typing with a pen tablet on Linux"
+requires-python = ">=3.9"
+# python-evdev and tkinter come from dnf on Fedora: python3-evdev python3-tkinter
+dependencies = []
+
+[project.optional-dependencies]
+freq = ["wordfreq"]
+
+[project.scripts]
+swipepen = "swipepen.__main__:main"
+
+[tool.setuptools]
+packages = ["swipepen"]
+
+[tool.setuptools.package-data]
+swipepen = ["data/*.txt"]
