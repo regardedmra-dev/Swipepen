@@ -14,6 +14,8 @@ I made it because typing hurts my finger joints. Writing with a light pen stroke
 > and this post explains exactly what they need — contributions are very welcome.** See
 > [Porting to macOS and Windows](#porting-to-macos-and-windows).
 
+![Alt Text](https://github.com/regardedmra-dev/Swipepen/blob/main/Screenshot_20261005_201607.png?raw=true)
+
 ---
 
 ## What it can do
