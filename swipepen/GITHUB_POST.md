@@ -4,7 +4,7 @@
 
 Swipepen puts a small on-screen keyboard under your pen tablet. You drag the pen across the letters of a word
 and lift. Swipepen works out which word you meant and types it into whatever app has focus (Google Docs, a
-browser, a text editor…). It is the same idea as swipe typing on a phone, built for a Wacom-style tablet.
+browser, a text editor…). It is the same idea as swipe typing on a phone, built for a Wacomno folder on-style tablet.
 
 I made it because typing hurts my finger joints. Writing with a light pen stroke is far gentler on the hands.
 
@@ -221,6 +221,4 @@ Ports (Windows, macOS, X11-only and Wayland-only setups), other keyboard layouts
 and bug reports are all welcome. Please include the output of `swipepen doctor` and your tablet model in bug
 reports.
 
-## License
 
-_(add your license here — MIT is a common, permissive choice)_
