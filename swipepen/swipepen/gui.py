@@ -28,9 +28,14 @@ from . import lexicon
 from .area import Area, PenRouter, load_config, save_config
 from .engine import (CANVAS_H, CANVAS_W, CANVAS_Y0, FUNCTION_KEYS, KEY_CENTER, STRIP_CELLS, SYM_CENTER,
                      function_label)
+from .trailfx import TrailTracker, lerp_hex, pressure_heat
+from .wellbeing import usage_path
 
 BG, KEY, KEY_FN, KEY_HI = "#1e1e24", "#34343e", "#2a2a33", "#3d7bd9"
 TEXT, DIM = "#e8e8ee", "#8a8a98"
+TRAIL = "#ffb454"                       # the swipe trail (amber) ...
+KEY_VISIT, KEY_NOW = "#2f4f86", "#5b93e6"   # ... keys the stroke passed over, and the key under the pen
+HINT_BG, HINT_TEXT = "#3a2f1a", "#ffb454"
 MAP_W = 170
 MIN_W = 100            # smallest window width in pixels
 GRIP = 14              # size of the resize grip in the corner
@@ -76,13 +81,24 @@ class App:
                                    self.cfg["notches_per_line"])
         session.predict = bool(self.cfg["predict"])
         session.learn_typing = bool(self.cfg["learn_typing"])
+        session.learn_corrections = bool(self.cfg["learn_corrections"])
+        if self.cfg["record_swipes"] and hasattr(session, "recorder"):
+            session.recorder.enabled = True          # (a --record FILE given on the command line stays on regardless)
         if hasattr(decoder, "set_looseness"):
             decoder.set_looseness(float(self.cfg["looseness"]))
+        if hasattr(session, "well"):
+            session.well.path = usage_path()          # only the daily stroke counts are kept on disk
+            session.well.load()
+            session.well.set_break_minutes(int(self.cfg["break_minutes"]))
+            session.pressure.enabled = bool(self.cfg["pressure_hint"])
+            session.pressure.limit = float(self.cfg["pressure_limit"])
         session.docs_menu_key = str(self.cfg["docs_menu_key"])
         session.docs_delay = float(self.cfg["docs_delay"])
         session.docs_auto = bool(self.cfg["docs_auto"])
         session.on_setting = self._on_session_setting
         self._drawn_layer = "letters"
+        self._syncing = False                       # true while a setting is being copied into its slider
+        self.fx = TrailTracker(track_keys=bool(self.cfg["highlight_keys"]))
 
         self.root = tk.Tk(className="Swipepen")
         self.root.title("swipepen")
@@ -97,6 +113,12 @@ class App:
         self.typewriter_var = tk.BooleanVar(value=bool(self.cfg["typewriter"]))
         self.predict_var = tk.BooleanVar(value=bool(self.cfg["predict"]))
         self.learn_var = tk.BooleanVar(value=bool(self.cfg["learn_typing"]))
+        self.corr_var = tk.BooleanVar(value=bool(self.cfg["learn_corrections"]))
+        self.trail_var = tk.BooleanVar(value=bool(self.cfg["show_trail"]))
+        self.hilite_var = tk.BooleanVar(value=bool(self.cfg["highlight_keys"]))
+        self.press_var = tk.BooleanVar(value=bool(self.cfg["pressure_hint"]))
+        rec = getattr(session, "recorder", None)
+        self.rec_var = tk.BooleanVar(value=bool(rec and rec.enabled))
         self.rot_var = tk.StringVar(value=next(
             (lbl for lbl, deg in ROTATIONS if deg == self.cfg["rotate"]), ROTATIONS[0][0]))
 
@@ -271,6 +293,31 @@ class App:
         self.speed_scale.set(self.s.edge_speed)
         self.speed_scale.configure(command=self._on_edge_speed)     # after set(): opening settings saves nothing
         self.speed_scale.pack(**pad)
+        tk.Checkbutton(win, text="Show my swipe trail on the keyboard", variable=self.trail_var,
+                       command=self._on_trail, bg=BG, fg=TEXT, selectcolor=KEY,
+                       activebackground=BG, activeforeground=TEXT).pack(**pad)
+        tk.Checkbutton(win, text="Light up the key under the pen and the keys I swipe over",
+                       variable=self.hilite_var, command=self._on_hilite, bg=BG, fg=TEXT, selectcolor=KEY,
+                       activebackground=BG, activeforeground=TEXT, wraplength=300, justify="left").pack(**pad)
+        self.break_scale = tk.Scale(win, from_=0, to=90, resolution=5, orient="horizontal",
+                                    label="Remind me to rest my hands every ... minutes (0 = never)",
+                                    bg=BG, fg=TEXT, highlightthickness=0, troughcolor=KEY, length=260)
+        self.break_scale.set(int(self.s.well.break_minutes))
+        self.break_scale.configure(command=self._on_break)
+        self.break_scale.pack(**pad)
+        tk.Checkbutton(win, text="Tell me when I keep pressing hard (a light touch is enough)",
+                       variable=self.press_var, command=self._on_press, bg=BG, fg=TEXT, selectcolor=KEY,
+                       activebackground=BG, activeforeground=TEXT, wraplength=300, justify="left").pack(**pad)
+        self.plimit_scale = tk.Scale(win, from_=20, to=100, orient="horizontal",
+                                     label="Counts as pressing hard from (% of the pen's range)",
+                                     bg=BG, fg=TEXT, highlightthickness=0, troughcolor=KEY, length=260)
+        self.plimit_scale.set(int(round(float(self.s.pressure.limit) * 100)))
+        self.plimit_scale.configure(command=self._on_plimit)
+        self.plimit_scale.pack(**pad)
+        self.well_label = tk.Label(win, text=self.s.well.summary(), bg=BG, fg=DIM, font=("sans", 9),
+                                   wraplength=300, justify="left")
+        self.well_label.pack(**pad)
+        tk.Button(win, text="Reset today's stroke count", command=self._reset_strokes).pack(fill="x", **pad)
         tk.Checkbutton(win, text="Fix typos as I type (hel lo, lone i, dont ...)", variable=self.autofix_var,
                        command=self._on_autofix, bg=BG, fg=TEXT, selectcolor=KEY,
                        activebackground=BG, activeforeground=TEXT).pack(**pad)
@@ -286,8 +333,15 @@ class App:
         tk.Checkbutton(win, text="Learn which words I use after which (kept on this computer)",
                        variable=self.learn_var, command=self._on_learn, bg=BG, fg=TEXT, selectcolor=KEY,
                        activebackground=BG, activeforeground=TEXT).pack(**pad)
-        tk.Button(win, text="Forget everything it learned from my typing", command=self._forget_phrases).pack(
+        tk.Checkbutton(win, text="Learn from the words I fix (picked another word, erased and redid)",
+                       variable=self.corr_var, command=self._on_learn_corr, bg=BG, fg=TEXT, selectcolor=KEY,
+                       activebackground=BG, activeforeground=TEXT).pack(**pad)
+        tk.Button(win, text="Forget everything it learned from my typing and fixes", command=self._forget_phrases).pack(
             fill="x", **pad)
+        tk.Checkbutton(win, text="Save my swipes on this computer, to measure and tune accuracy (off by default)",
+                       variable=self.rec_var, command=self._on_record, bg=BG, fg=TEXT, selectcolor=KEY,
+                       activebackground=BG, activeforeground=TEXT, wraplength=300, justify="left").pack(**pad)
+        tk.Button(win, text="Delete my saved swipes", command=self._delete_swipes).pack(fill="x", **pad)
         self.docs_scale = tk.Scale(win, from_=0.05, to=1.0, resolution=0.05, orient="horizontal",
                                    label="Google Docs check: pause between keys (seconds)",
                                    bg=BG, fg=TEXT, highlightthickness=0, troughcolor=KEY, length=260)
@@ -398,6 +452,30 @@ class App:
         self.cfg["edge_speed"] = round(float(value), 2)
         self._schedule_save()
 
+    def _on_trail(self):
+        if not self.trail_var.get():
+            self.fx.clear()
+        self._schedule_save()
+
+    def _on_hilite(self):
+        self.fx.track_keys = bool(self.hilite_var.get())
+        self._schedule_save()
+
+    def _on_break(self, value):
+        if not self._syncing:
+            self.s.set_setting("break_minutes", int(float(value)))
+
+    def _on_press(self):
+        self.s.set_setting("pressure_hint", bool(self.press_var.get()))
+
+    def _on_plimit(self, value):
+        if not self._syncing:
+            self.s.set_setting("pressure_limit", round(float(value) / 100.0, 2))
+
+    def _reset_strokes(self):
+        self.s.well.clear_today()
+        self.s.message = "stroke count reset"
+
     def _on_autofix(self):
         self.s.autofix = bool(self.autofix_var.get())
         self._schedule_save()
@@ -411,9 +489,19 @@ class App:
     def _on_learn(self):
         self.s.set_setting("learn_typing", bool(self.learn_var.get()))
 
+    def _on_learn_corr(self):
+        self.s.set_setting("learn_corrections", bool(self.corr_var.get()))
+
+    def _on_record(self):
+        self.s.set_setting("record_swipes", bool(self.rec_var.get()))
+
+    def _delete_swipes(self):
+        self.s.message = "deleted saved swipes" if self.s.recorder.clear() else "no saved swipes"
+
     def _forget_phrases(self):
         self.s.get_predictor().forget()
-        self.s.message = "forgot learned phrases"
+        self.s.get_corrections().forget()
+        self.s.message = "forgot learned phrases and fixes"
 
     def _on_looseness(self, value):
         v = float(value) / 100.0
@@ -451,7 +539,27 @@ class App:
             self.predict_var.set(bool(value))
         elif name == "learn_typing":
             self.learn_var.set(bool(value))
+        elif name == "learn_corrections":
+            self.corr_var.set(bool(value))
+        elif name == "record_swipes":
+            self.rec_var.set(bool(value))
+            self.cfg["record_swipes"] = bool(value)     # only the checkbox is saved, never a one-off --record FILE
+        elif name == "break_minutes":
+            self._set_scale("break_scale", int(value))
+        elif name == "pressure_hint":
+            self.press_var.set(bool(value))
+        elif name == "pressure_limit":
+            self._set_scale("plimit_scale", int(round(float(value) * 100)))
         self._schedule_save()
+
+    def _set_scale(self, attr, value):
+        scale = getattr(self, attr, None)
+        if scale is not None:
+            self._syncing = True
+            try:
+                scale.set(value)
+            finally:
+                self._syncing = False
 
     def _mini_h(self) -> int:
         return max(40, int(MAP_W / self.area.aspect))
@@ -530,8 +638,12 @@ class App:
                         typewriter=bool(self.s.typewriter), predict=bool(self.s.predict),
                         docs_menu_key=str(self.s.docs_menu_key), docs_delay=round(float(self.s.docs_delay), 2),
                         docs_auto=bool(self.s.docs_auto),
-                        learn_typing=bool(self.s.learn_typing), chars_per_line=int(self.s.chars_per_line),
-                        notches_per_line=round(float(self.s.notches_per_line), 2))
+                        learn_typing=bool(self.s.learn_typing), learn_corrections=bool(self.s.learn_corrections), chars_per_line=int(self.s.chars_per_line),
+                        notches_per_line=round(float(self.s.notches_per_line), 2),
+                        show_trail=bool(self.trail_var.get()), highlight_keys=bool(self.hilite_var.get()),
+                        break_minutes=int(self.s.well.break_minutes),
+                        pressure_hint=bool(self.s.pressure.enabled),
+                        pressure_limit=round(float(self.s.pressure.limit), 2))
         save_config(self.cfg)
 
     # ---- plumbing ---------------------------------------------------------
@@ -584,6 +696,7 @@ class App:
             self.s.learn_word()
 
     def _cancel_stroke(self):
+        self.fx.clear()
         self.router.reset()
         self.s.cancel_stroke()
         self.s.hover_pos = None
@@ -699,6 +812,7 @@ class App:
         c = self.canvas
         self._rect(-0.2, CANVAS_Y0 - 0.2, CANVAS_W + 0.2, CANVAS_H + CANVAS_Y0 + 0.2, fill=BG, outline="", tags="dyn")
         fills = {"item": KEY, "hi": KEY_HI, "on": "#2f6f4f", "dim": KEY_FN, "head": BG, "text": BG, "title": KEY_FN}
+        hov = self.s.hover_pos if self.hilite_var.get() else None
         for b in panel.layout():
             tappable = b.action is not None
             fill = fills.get(b.style, KEY)
@@ -706,6 +820,8 @@ class App:
                 fill = KEY_HI if b.style == "hi" else KEY_FN if not tappable or b.kind == "tab" else KEY
             if b.kind == "cell" and b.style in ("text", "head", "dim") and not tappable:
                 fill = BG
+            if tappable and hov and b.contains(*hov):
+                fill = KEY_NOW                          # the box the pen is over
             self._rect(b.x0, b.y0, b.x1, b.y1, fill=fill, outline="", tags="dyn")
             colour = {"head": "#9ad0ff", "dim": DIM, "text": TEXT, "title": "#ffd479"}.get(b.style, TEXT if tappable else DIM)
             if b.kind != "cell":
@@ -717,12 +833,39 @@ class App:
             self._text(x, (b.y0 + b.y1) / 2, b.text, size, fill=colour, anchor="w" if left else "center",
                        tags="dyn")
 
+    def _draw_highlights(self):
+        """Light up the key under the pen and the keys the stroke has passed over (the label is redrawn on top)."""
+        s = self.s
+        for rect, role, kind, val in self.fx.highlights(s.hover_pos, s.layer, show_visited=True):
+            self._rect(*rect, fill=KEY_NOW if role == "current" else KEY_VISIT, outline="", tags="dyn")
+            if kind == "key":
+                label, size = function_label("shift" if val == "page" else val, s.layer), 0.26
+            else:
+                label, size = val, 0.38
+            self._text((rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2, label, size, fill=TEXT, tags="dyn")
+
+    def _draw_trail(self, now):
+        c, S = self.canvas, self.S
+        for pts, heat, wscale in self.fx.segments(now):
+            flat = []
+            for x, y in pts:
+                flat += [self._px(x), self._py(y)]
+            c.create_line(*flat, fill=lerp_hex(BG, TRAIL, heat), width=max(1.5, S * 0.075 * wscale),
+                          smooth=True, capstyle="round", joinstyle="round", tags="dyn")
+
     def _redraw(self):
         c, S, s = self.canvas, self.S, self.s
         c.delete("dyn")
         if s.layer != self._drawn_layer:
             c.delete("static")
             self._draw_static()
+        now = time.time()
+        if self.trail_var.get() or self.hilite_var.get():
+            self.fx.update(s.trail, now, s.layer)
+        else:
+            self.fx.clear()
+        if self.hilite_var.get() and not s.panel:
+            self._draw_highlights()
         w = CANVAS_W / STRIP_CELLS
         cands = s.last.cands if s.last else []
         if s.panel:
@@ -745,21 +888,27 @@ class App:
                 x0, x1, y0, y1 = FUNCTION_KEYS["shift"]
                 self._rect(x0 + 0.03, y0 + 0.03, x1 - 0.03, y1 - 0.03, fill=KEY_HI, outline="", tags="dyn")
                 self._text((x0 + x1) / 2, (y0 + y1) / 2, "CAPS" if s.caps else "SHIFT", 0.26, fill=TEXT, tags="dyn")
-        if len(s.trail) > 1:
-            flat = []
-            for x, y in s.trail:
-                flat += [self._px(x), self._py(y)]
-            c.create_line(*flat, fill="#ffb454", width=max(2, int(S * 0.07)), smooth=True, tags="dyn")
+        if self.trail_var.get():
+            self._draw_trail(now)
         if s.hover_pos:
             x, y = s.hover_pos
             r = max(3, S * (0.1 if s.pen_down_now else 0.07))
+            colour = "#ff5c5c"
+            p = s.pressure.level if (s.pen_down_now and s.pressure.enabled) else 0.0
+            if p > 0:                                  # light touch: pale yellow ... pressing hard: red, and bigger
+                r += S * 0.08 * p
+                colour = lerp_hex("#ffd479", "#ff4040", pressure_heat(p, s.pressure.limit))
             c.create_oval(self._px(x) - r, self._py(y) - r, self._px(x) + r, self._py(y) + r,
-                          fill="#ff5c5c" if s.pen_down_now else "", outline="#ff5c5c", width=2, tags="dyn")
+                          fill=colour if s.pen_down_now else "", outline=colour, width=2, tags="dyn")
 
         # short messages flash in the suggestion strip instead of a status line
         if s.message != self._last_msg:
             self._last_msg, self._flash_until = s.message, time.time() + 1.6
-        if time.time() < self._flash_until and not s.panel:
+        hint = bool(s.hint_text) and s.clock() < s.hint_until and not s.panel
+        if hint:                                    # "lighter touch is enough": over the strip, in amber
+            self._rect(0, -1.0, CANVAS_W, 0.0, fill=HINT_BG, outline="", tags="dyn")
+            self._text(CANVAS_W / 2, -0.5, s.hint_text[:40], 0.3, fill=HINT_TEXT, tags="dyn")
+        elif time.time() < self._flash_until and not s.panel:
             if s.message.startswith(("no match", "error")):
                 self._text(CANVAS_W / 2, -0.5, s.message[:40], 0.28, fill="#ff8a8a", tags="dyn")
             elif s.message.startswith(("erase", "cursor", "tidy", "learn", "fixed", "already", "undo", "replaced",
@@ -778,6 +927,10 @@ class App:
         if self._settings_open:
             if self.reader:
                 self._draw_mini()
+            summary = s.well.summary()
+            if summary != getattr(self, "_well_text", None):
+                self._well_text = summary
+                self.well_label.configure(text=summary)
             text = s.message
             if self.active and self.reader and self.router.pen_uv and not s.hover_pos and not s.pen_down_now:
                 text = "pen is outside the keyboard area (turn on 'follow', or move onto the blue box)"

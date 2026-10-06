@@ -6,14 +6,15 @@ units (see engine.py). The injector is anything with:
 """
 from __future__ import annotations
 
-import json
 import re
 import time
 import unicodedata
 from collections import deque
 
 from . import tidy as tidy_mod
-from .engine import CANVAS_W, Decoder, classify, path_length
+from .engine import CANVAS_W, Decoder, classify, dist, path_length, resample
+from .recorder import Recorder
+from .wellbeing import PressureMonitor, Wellbeing
 
 TAP_MAX_LENGTH = 0.8   # strokes shorter than this (key units) are taps
 ERASE_FIRST = 0.8      # swipe left this far on backspace to select the first word...
@@ -33,6 +34,8 @@ ATTACH_LEFT = set(".,!?:;)]}%")      # these hug the word before them: "word !" 
 SPACE_AFTER = set("!?:;")            # ...and start a new word after them
 TIDY_MAX_CHARS = 1200  # "tidy" looks at most this far back (more arrow presses = slower)
 WORD_RE = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)*")
+REDO_WINDOW = 12.0     # erase a swiped word and swipe again within this many seconds = "that was a miss, redo"
+REDO_DIST = 1.0        # ...if the new path is this close (mean key units) to the erased one
 
 
 class _Tracked:
@@ -107,7 +110,7 @@ class _Tracked:
 
 class _Last:
     """The last swipe-typed word, so Backspace / candidate taps can undo it."""
-    __slots__ = ("typed", "cands", "chosen", "shifted", "caps")
+    __slots__ = ("typed", "cands", "chosen", "shifted", "caps", "id", "pts", "how", "redo_of")
 
     def __init__(self, typed, cands, shifted, caps=False):
         self.typed = typed          # text on screen, WITHOUT the trailing space
@@ -115,16 +118,24 @@ class _Last:
         self.chosen = 0
         self.shifted = shifted
         self.caps = caps
+        self.id = 0                 # recorder id of this swipe
+        self.pts = None             # the stroke (key units), to recognise "erase and swipe it again"
+        self.how = "kept"           # what happened to it: kept / accept / erased
+        self.redo_of = None         # the word that was erased right before this swipe redid it
 
 
 class Session:
     def __init__(self, decoder: Decoder, injector, record_path: str | None = None,
                  auto_cap_after_period: bool = True):
+        self._last = None             # (see the `last` property)
         self.decoder = decoder
         self.inj = _Tracked(injector)
         self.autofix = True           # fix typos live (hel lo -> hello, lone i -> I, ...)
         self.edge_speed = 1.0         # multiplier for the cursor momentum at the keyboard edge
-        self.record_path = record_path
+        self.recorder = Recorder(record_path, enabled=bool(record_path))   # off unless asked for
+        self.learn_corrections = False  # learn from the words you fix (the window turns it on)
+        self.corrections = None
+        self._erased = None           # (the swiped word just erased, when): lets us spot an immediate redo
         self.auto_cap = auto_cap_after_period
         self.shift = False            # one-shot capital for the next letter / word
         self.caps = False             # caps lock (double-tap shift)
@@ -134,7 +145,6 @@ class Session:
         self.trail: list[tuple[float, float]] = []
         self.hover_pos: tuple[float, float] | None = None
         self.pen_down_now = False
-        self.last: _Last | None = None
         self.trailing_space = False   # did we auto-insert a space after the last word?
         self.message = ""             # short status text for the GUI
         self._gmode = None            # "erase" (started on backspace) / "cursor" (started on space)
@@ -168,13 +178,54 @@ class Session:
         self.docs_auto = True         # after picking a fix in Docs, jump to the next error
         self._macro_busy = False
         self.on_setting = None        # callback(name, value): the window saves settings changed from a panel
+        self.well = Wellbeing(clock=lambda: self.clock())          # stroke counter and break reminders
+        self.pressure = PressureMonitor(clock=lambda: self.clock())  # "lighter touch" hint
+        self.hint_text = ""           # a short hint the window draws in the strip for a moment
+        self.hint_until = 0.0
         self._dictionary = None
         self._speller = None
         self._lt = None               # cached LanguageTool address: str, or False for "none found"
 
+    @property
+    def last(self) -> "_Last | None":
+        return self._last
+
+    @last.setter
+    def last(self, new):
+        old, self._last = self._last, new
+        if old is not None and old is not new:
+            self._finalize(old)               # the word is final now: nothing can change it from the strip any more
+
+    def _finalize(self, old):
+        """A swiped word is final (you carried on, confirmed it, picked another, or erased it): record and learn."""
+        word = old.cands[old.chosen] if old.cands else None
+        how = old.how
+        if how != "erased" and old.chosen != 0:
+            how = "pick"
+        self.recorder.write({"ev": "final", "id": old.id, "word": None if how == "erased" else word, "how": how})
+        if how == "erased" or not (self.learn_corrections and word):
+            return
+        if old.chosen != 0:
+            self.get_corrections().learn(word, old.cands[0])
+        if old.redo_of and word.lower() != old.redo_of.lower():
+            self.get_corrections().learn(word, old.redo_of)
+
+    def get_corrections(self):
+        if self.corrections is None:
+            from .corrections import CorrectionModel
+            self.corrections = CorrectionModel()
+        return self.corrections
+
     # ---- pen events -------------------------------------------------------
     def hover(self, x, y):
         self.hover_pos = (x, y)
+
+    def set_pressure(self, p):
+        """How hard the pen is pressed right now (0..1); sent just before pen_down / pen_move."""
+        self.pressure.feed(p)
+
+    def show_hint(self, text, seconds=2.5):
+        self.hint_text, self.hint_until = text, self.clock() + seconds
 
     def pen_down(self, x, y):
         self.pen_down_now = True
@@ -207,6 +258,7 @@ class Session:
             self.inj.collapse_selection()
         self.pen_down_now = False
         self.trail = []
+        self.pressure.abandon()
         self._gmode = None
         self._gwords = self._gsteps = 0
         self._gactive = False
@@ -260,6 +312,7 @@ class Session:
         pen rests on the keyboard's edge during a space-bar swipe, faster the longer it stays."""
         if self._jobs:
             self._poll_jobs()
+        self._break_check()
         if not (self.pen_down_now and self._gmode == "cursor" and self._gedge):
             return
         now = self.clock()
@@ -300,6 +353,9 @@ class Session:
             return
         self.pen_down_now = False
         pts, self.trail = self.trail, []
+        self.well.stroke()
+        if self.pressure.end_stroke():
+            self.show_hint("lighter touch is enough")
         mode, self._gmode = self._gmode, None
         if mode == "erase" and self._gwords:
             n, self._gwords = self._gwords, 0
@@ -336,14 +392,40 @@ class Session:
         word = cands[0]
         shifted, caps = self.shift, self.caps
         typed = self._apply_case(word, shifted, caps)
+        ctx = self._context() if self.recorder.enabled else None
         lead = " " if self._mid_word() else ""         # tapped "i", then swiped "want": "i want", not "iwant"
         self.inj.type_text(lead + typed + " ")
         self.shift = False
-        self.last = _Last(typed, cands, shifted, caps)
+        redo = self._take_redo(pts)                    # (erased swipe's id, the word that was erased) or None
+        new = _Last(typed, cands, shifted, caps)
+        new.id = self.recorder.new_id()
+        new.pts = pts
+        if redo:
+            new.redo_of = redo[1]
+        self.last = new
         self.trailing_space = True
         self.message = f"typed: {typed}"
+        if self.recorder.enabled:
+            rec = {"ev": "swipe", "id": new.id, "pts": [[round(x, 3), round(y, 3)] for x, y in pts],
+                   "cands": cands, "ctx": (ctx[0][-3:] if ctx else []), "shift": shifted, "caps": caps,
+                   "ys": getattr(self.decoder, "ys", None), "loose": getattr(self.decoder, "looseness", None)}
+            if redo:
+                rec["redo_of"] = redo[0]
+            self.recorder.write(rec)
         self._live_fix()
-        self._record({"points": [[round(x, 3), round(y, 3)] for x, y in pts], "cands": cands})
+
+    def _take_redo(self, pts):
+        """Was this swipe a second try at the word just erased? Returns (its recorder id, the word erased) or None."""
+        erased, self._erased = self._erased, None
+        if not erased:
+            return None
+        old, when = erased
+        if self.clock() - when > REDO_WINDOW or not old.pts:
+            return None
+        a, b = resample(old.pts, 24), resample(pts, 24)
+        if sum(dist(p, q) for p, q in zip(a, b)) / 24 > REDO_DIST:
+            return None
+        return old.id, old.cands[old.chosen]
 
     # ---- what comes next: context, strip, prediction -----------------------------------------------
     def get_predictor(self):
@@ -370,6 +452,15 @@ class Session:
         return words, at_start, partial
 
     def _rerank(self, ranked):
+        """Small pushes on top of the swipe: the word before (prediction) and your past corrections.
+        The swipe still decides; these only reorder close calls."""
+        if self.learn_corrections and len(ranked) > 1:
+            adj = self.get_corrections().adjust([w for w, _ in ranked])
+            if adj:
+                ranked = sorted(((w, c + adj.get(w.lower(), 0.0)) for w, c in ranked), key=lambda wc: wc[1])
+        return self._rerank_context(ranked)
+
+    def _rerank_context(self, ranked):
         """Swipe results that fit the word before come first (a small push, the swipe still decides)."""
         if not (self.predict and len(ranked) > 1) or self._mid_word():
             return ranked
@@ -444,6 +535,9 @@ class Session:
         """Save what was learned (the window calls this when it closes)."""
         if self.predictor:
             self.predictor.save()
+        if self.corrections:
+            self.corrections.save()
+        self.well.save()
 
     def _mid_word(self) -> bool:
         """Is the caret right behind letters we typed (so a swiped word needs a space first)?"""
@@ -511,6 +605,7 @@ class Session:
         if i >= len(self.last.cands):
             return
         if i == self.last.chosen:             # tap the word that is already in: accept it, show what comes next
+            self.last.how = "accept"
             self.last = None
             self.message = "ok"
             return
@@ -520,7 +615,6 @@ class Session:
         self.last.typed = new
         self.last.chosen = i
         self.message = f"changed to: {new}"
-        self._record({"correction": self.last.cands[i]})
 
     def _commit_suggestion(self, word, mode):
         """Tap on a next-word prediction or a completion."""
@@ -535,7 +629,6 @@ class Session:
         self.last = None
         self.trailing_space = True
         self.message = f"typed: {word}"
-        self._record({"suggestion": word, "mode": mode})
 
     def _function_key(self, name):
         if name == "shift":
@@ -571,6 +664,8 @@ class Session:
                 self.undo()                   # right after an automatic fix: Backspace takes the fix back
             elif self.last:                   # after a swipe: delete the whole word
                 self.inj.backspace(len(self.last.typed) + 1)
+                gone, self.last.how = self.last, "erased"
+                self._erased = (gone, self.clock())
                 self.last = None
                 self.trailing_space = False
             else:
@@ -792,6 +887,22 @@ class Session:
         from .panels import DocsKeysPanel
         self.open_panel(DocsKeysPanel(self))
 
+    def open_break(self):
+        from .panels import BreakPanel
+        self.well.shown()
+        self.open_panel(BreakPanel(self))
+
+    def _break_check(self):
+        """Every tick: restart the work timer after a real rest, and bring up the break panel when it is due
+        (only between strokes and only when no other panel is open); close it again if you rested without tapping."""
+        w, now = self.well, self.clock()
+        w.idle_check(now)
+        if getattr(self.panel, "is_break", False):
+            if not w.due():
+                self.close_panel()
+        elif not self.panel and not self.pen_down_now and not self._macro_busy and w.ready(now):
+            self.open_break()
+
     def set_setting(self, name, value):
         if name == "autofix":
             self.autofix = bool(value)
@@ -807,6 +918,16 @@ class Session:
             self.predict = bool(value)
         elif name == "learn_typing":
             self.learn_typing = bool(value)
+        elif name == "learn_corrections":
+            self.learn_corrections = bool(value)
+        elif name == "record_swipes":
+            self.recorder.enabled = bool(value)
+        elif name == "break_minutes":
+            self.well.set_break_minutes(int(value))
+        elif name == "pressure_hint":
+            self.pressure.enabled = bool(value)
+        elif name == "pressure_limit":
+            self.pressure.limit = float(value)
         if self.on_setting:
             self.on_setting(name, value)
 
@@ -929,11 +1050,3 @@ class Session:
     def reload_words(self):
         from . import lexicon
         self.decoder.set_user_words(lexicon.user_entries())
-
-    # ---- recording ----------------------------------------------------------
-    def _record(self, obj):
-        if not self.record_path:
-            return
-        obj["t"] = round(time.time(), 2)
-        with open(self.record_path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(obj) + "\n")

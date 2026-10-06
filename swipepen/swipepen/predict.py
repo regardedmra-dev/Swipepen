@@ -3,6 +3,7 @@
 Two sources, mixed:
   * a built-in list of what usually follows the most common English words (small, hand-made, so it is
     sensible but not clever)
+  * an optional word-pair table made from real text (`swipepen build-ngrams`, see ngrams.py); none is shipped
   * what YOU write: every pair and triple of words you finish is counted and saved on this computer
     (~/.config/swipepen/phrases.json). Nothing is sent anywhere. It gets better the more you write, and you can
     switch learning off or wipe it in Settings.
@@ -190,10 +191,17 @@ def phrases_path():
 class Predictor:
     SAVE_EVERY = 25
     MAX_CONTEXTS = 6000
+    CORPUS_WEIGHT = 3.0      # a follower with a 40% share scores 1.2: above the hand-made list, below words you used yourself
 
-    def __init__(self, known=None, path: str | None = "auto", learning: bool = True):
-        """known: callable(word) -> truthy if the word is a real word (predictions are filtered by it)."""
+    def __init__(self, known=None, path: str | None = "auto", learning: bool = True,
+                 corpus="auto", lang: str = "en"):
+        """known: callable(word) -> truthy if the word is a real word (predictions are filtered by it).
+        corpus: "auto" = the word-pair table on this computer if there is one; or {prev: [(next, share)]}; or None."""
         self.known = known
+        if corpus == "auto":
+            from . import ngrams
+            corpus = ngrams.load_table(lang)
+        self.corpus = dict(corpus or {})
         self.learning = learning
         self.path = phrases_path() if path == "auto" else path
         self.seed = _parse_seed()
@@ -274,6 +282,8 @@ class Predictor:
                 scores[w] += 4.0 * n
         for w, n in self.bi.get(prev, {}).items():
             scores[w] += 2.0 * n
+        for w, share in self.corpus.get(prev, ()):
+            scores[w] += self.CORPUS_WEIGHT * share
         for rank, w in enumerate(self.seed.get(prev, ())):
             scores[w] += 1.0 / (1 + rank * 0.5)
         return scores

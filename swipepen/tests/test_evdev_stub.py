@@ -202,3 +202,31 @@ check("rotate 90 swaps the tablet aspect", abs(r90.aspect - 1 / r0.aspect) < 1e-
 r0.set_rotate(180)
 check("rotation can be changed while running", r0.rotate == 180 and abs(r0.aspect - 2.0) < 1e-9)
 print("\nAll rotation tests passed.")
+
+# ---- pen pressure (optional) ------------------------------------------------------------------------
+rn = PenReader()
+check("a pen without ABS_PRESSURE reports no pressure (events keep their old shape)", rn.pmax == 0)
+codes.ABS_PRESSURE = 24
+_caps, _abs = InputDevice.capabilities, InputDevice.absinfo
+InputDevice.capabilities = lambda self, **kw: {codes.EV_ABS: [(codes.ABS_X, None), (codes.ABS_Y, None), (codes.ABS_PRESSURE, None)],
+                                               codes.EV_KEY: [codes.BTN_TOOL_PEN, codes.BTN_TOUCH, codes.BTN_STYLUS, codes.BTN_STYLUS2]}
+InputDevice.absinfo = lambda self, code: AbsInfo(0, 1000) if code == codes.ABS_X else AbsInfo(0, 500) if code == codes.ABS_Y else AbsInfo(0, 1023)
+def press(v): return [E(codes.EV_ABS, codes.ABS_PRESSURE, v)]
+InputDevice.script = (
+    [E(codes.EV_KEY, codes.BTN_TOOL_PEN, 1)] + pos(100, 100) + [SYN] +                       # hover
+    press(200) + [E(codes.EV_KEY, codes.BTN_TOUCH, 1)] + [SYN] +                              # down, pressure 200
+    press(1023) + pos(600, 250) + [SYN] +                                                     # move, full pressure
+    press(0) + [E(codes.EV_KEY, codes.BTN_TOUCH, 0)] + [SYN] +                               # up
+    [E(codes.EV_KEY, codes.BTN_TOOL_PEN, 0)] + [SYN]
+)
+rp = PenReader()
+check("a pen with ABS_PRESSURE: the range is read", rp.pmax == 1023, rp.pmax)
+rp.set_active(True); rp.run()
+evp = []
+while not rp.events.empty():
+    evp.append(rp.events.get())
+check("hover carries no pressure, down and move carry it as a 4th number",
+      [len(e) for e in evp] == [3, 4, 4, 1, 1] and [e[0] for e in evp] == ["hover", "down", "move", "up", "leave"], evp)
+check("pressure is normalised to 0..1", abs(evp[1][3] - 200 / 1023) < 1e-3 and evp[2][3] == 1.0, evp)
+InputDevice.capabilities, InputDevice.absinfo = _caps, _abs
+print("\nAll pressure tests passed.")

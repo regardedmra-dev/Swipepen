@@ -4,11 +4,11 @@
 
 Swipepen puts a small on-screen keyboard under your pen tablet. You drag the pen across the letters of a word
 and lift. Swipepen works out which word you meant and types it into whatever app has focus (Google Docs, a
-browser, a text editor…). It is the same idea as swipe typing on a phone, built for a Wacomno folder on-style tablet.
+browser, a text editor…). It is the same idea as swipe typing on a phone, built for a Wacom-style tablet.
 
 I made it because typing hurts my finger joints. Writing with a light pen stroke is far gentler on the hands.
 
-> **Status: v0.5.3 — works on Linux only today.** It was built and tested on **Fedora KDE + Wacom Bamboo +
+> **Status: v0.7.0 — works on Linux only today.** It was built and tested on **Fedora KDE + Wacom Bamboo +
 > Firefox + Google Docs**. The decoder and all the "smart" parts are plain Python and portable, but the three
 > small pieces that talk to the operating system are Linux-specific. **macOS and Windows ports are not done yet,
 > and this post explains exactly what they need — contributions are very welcome.** See
@@ -26,6 +26,8 @@ I made it because typing hurts my finger joints. Writing with a light pen stroke
 - **Next-word prediction and completions**, like Gboard. You can build whole sentences by tapping suggestions.
   It learns the phrases you write (stored **only on your computer**, in `~/.config/swipepen/phrases.json`;
   you can turn learning off or wipe it).
+- **Learns from your fixes**: pick another word in the strip, or erase and swipe again, and it remembers (local,
+  capped, wipeable).
 - Auto-space, one-shot Shift, **Caps Lock** (double-tap), number/symbol layers (`?123` / `ABC`).
 - **Swipe over Backspace to erase** words, **swipe over Space to move the cursor** (with edge momentum).
 - Layouts for the apostrophe key: `us`, `es`, `latam` (other characters are pasted via the clipboard).
@@ -37,6 +39,17 @@ I made it because typing hurts my finger joints. Writing with a light pen stroke
 - **Undo** (and Redo in the Google Docs panel).
 - **Paragraph check**: built-in grammar rules and spelling suggestions, plus **LanguageTool** if you run a
   local server (auto-detected on `127.0.0.1:8081` / `8010`, or set `languagetool_url`).
+
+**Accuracy tools (opt-in, local only)**
+- *Save my swipes* (off by default) records swipes and what you did next; `swipepen replay` re-runs them through the
+  decoder and `--sweep looseness=0,0.5,1` compares settings on your own hand. `swipepen build-ngrams YOUR-TEXT --evaluate`
+  makes a word-pair table from text you choose and measures it on held-back sentences. No table or recording is bundled.
+
+**Easy on the hands**
+- **Swipe trail** that fades with age and lights the keys under the pen, so you can see what the decoder sees.
+- **Break reminders** after a chosen amount of writing (never mid-word; snooze, skip or take the break), a daily
+  **stroke counter**, and a **"lighter touch" hint** when you keep pressing hard (needs a pen that reports pressure).
+  Only daily totals are kept, on your computer.
 
 **Dictionary**
 - Tap a word to see its **definition, synonyms and antonyms**. Offline through WordNet

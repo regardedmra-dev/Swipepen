@@ -19,7 +19,10 @@ DEFAULTS = {"size": 0.5, "cx": 0.5, "cy": 0.5, "topmost": True, "scale": 60, "ro
             "typewriter": False, "chars_per_line": 80, "notches_per_line": 0.25,
             "languagetool_url": "", "online_lookup": True,
             "predict": True, "learn_typing": True, "looseness": 0.5,
-            "docs_menu_key": "ctrl+shift+\\", "docs_menu_v": 2, "docs_delay": 0.25, "docs_auto": True}
+            "learn_corrections": True, "record_swipes": False,
+            "docs_menu_key": "ctrl+shift+\\", "docs_menu_v": 2, "docs_delay": 0.25, "docs_auto": True,
+            "show_trail": True, "highlight_keys": True, "break_minutes": 30,
+            "pressure_hint": True, "pressure_limit": 0.6}
 SIZE_MIN, SIZE_MAX = 0.05, 1.0
 
 
@@ -51,6 +54,8 @@ def load_config() -> dict:
     if cfg["docs_menu_key"] not in ("shift+f10", "ctrl+shift+x", "ctrl+shift+\\"):
         cfg["docs_menu_key"] = DEFAULTS["docs_menu_key"]
     cfg["looseness"] = min(1.0, max(0.0, float(cfg["looseness"])))
+    cfg["break_minutes"] = min(120, max(0, int(cfg["break_minutes"])))
+    cfg["pressure_limit"] = min(1.0, max(0.2, float(cfg["pressure_limit"])))
     cfg["chars_per_line"] = min(200, max(20, int(cfg["chars_per_line"])))
     cfg["notches_per_line"] = min(1.0, max(0.05, float(cfg["notches_per_line"])))
     return cfg
@@ -156,6 +161,12 @@ class PenRouter:
             self.on_moved()
         return a.map(u, v)
 
+    def _pressure(self, p):
+        if p is not None:
+            fn = getattr(self.s, "set_pressure", None)
+            if fn:
+                fn(p)
+
     def handle(self, ev):
         kind = ev[0]
         if kind == "leave":
@@ -169,6 +180,7 @@ class PenRouter:
             self._ok = False
             return
         u, v = ev[1], ev[2]
+        pressure = ev[3] if len(ev) > 3 else None       # 0..1, when the pen reports it
         self.pen_uv = (u, v)
         un, vn = self.area.map(u, v)
         inside = 0.0 <= un <= 1.0 and 0.0 <= vn <= 1.0
@@ -185,9 +197,11 @@ class PenRouter:
         elif kind == "down":
             self._ok = inside
             if inside:
+                self._pressure(pressure)
                 self.s.pen_down(cx, cy)
             else:
                 self.s.hover_pos = None
         elif kind == "move":
             if self._ok:
+                self._pressure(pressure)
                 self.s.pen_move(cx, cy)

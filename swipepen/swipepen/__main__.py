@@ -125,6 +125,65 @@ def cmd_define(args):
         print(f"\n{label}: " + ", ".join(words))
 
 
+def cmd_swipes(args):
+    from .recorder import Recorder, default_path
+    rec = Recorder(args.file or default_path())
+    if args.action == "path":
+        print(rec.path)
+    elif args.action == "clear":
+        print("deleted " + rec.path if rec.clear() else "nothing to delete: " + rec.path)
+    else:
+        lines, size = rec.info()
+        print(f"{rec.path}\n{lines} records, {size / 1024:.0f} KB" if lines else f"no recording at {rec.path}")
+        print("Recording is off unless you switch it on in Settings (or run with --record FILE).")
+
+
+def cmd_replay(args):
+    from .replay import run_cli
+    try:
+        code = run_cli(args)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
+    if code:
+        sys.exit(code)
+
+
+def cmd_build_ngrams(args):
+    from . import lexicon, ngrams
+    from .predict import Predictor
+    files = ngrams.find_files(args.paths)
+    if not files:
+        raise SystemExit("no text files found (looked for " + " ".join(ngrams.TEXT_EXT) + ")")
+    known = {w.lower(): lp for w, _k, lp in lexicon.load_lexicon(args.lang, verbose=False)}.get
+
+    def stream():
+        for f in files:
+            yield from ngrams.sentences(ngrams.read_text(f))
+
+    out = args.out or ngrams.config_file(args.lang)
+    if args.evaluate:
+        train, test = ngrams.split_sentences(list(stream()), 0.1)
+        counts = ngrams.count_pairs(train, known)
+        table = ngrams.shares(ngrams.trim(counts, args.top, args.min_count))
+        base = Predictor(known, path=None, learning=False, corpus={})
+        withtab = Predictor(known, path=None, learning=False, corpus=table)
+        a, b = ngrams.evaluate(test, base), ngrams.evaluate(test, withtab)
+        n = max(1, a["n"])
+        print(f"held-back words: {a['n']}   (the table was built from the other {len(train)} sentences)")
+        print(f"  {'':<22}{'1st suggestion':>16}{'in the 3 shown':>16}")
+        print(f"  {'built-in list only':<22}{a[1] / n:>16.1%}{a[3] / n:>16.1%}")
+        print(f"  {'+ your table':<22}{b[1] / n:>16.1%}{b[3] / n:>16.1%}\n")
+        counts += ngrams.count_pairs(test, known)
+    else:
+        counts = ngrams.count_pairs(stream(), known)
+    table = ngrams.trim(counts, args.top, args.min_count)
+    if not table:
+        raise SystemExit("not enough text: no word pair was seen " + str(args.min_count) + " times (try --min-count 2)")
+    n = ngrams.write_table(table, out)
+    print(f"{len(files)} files, {sum(counts.values())} word pairs counted -> {n} kept for {len(table)} words\n[{out}]")
+    print("A running swipepen picks it up at its next start.")
+
+
 def cmd_update(args):
     from .updater import run_update
     sys.exit(run_update(args.archive, window=args.window, restart=not args.no_restart))
@@ -239,6 +298,31 @@ def main(argv=None):
     df.add_argument("word")
     df.add_argument("--offline", action="store_true", help="never use the internet")
     df.set_defaults(func=cmd_define)
+
+    sw = sub.add_parser("swipes", help="your recorded swipes (off unless you switch it on): info, path, clear")
+    sw.add_argument("action", choices=("info", "path", "clear"), nargs="?", default="info")
+    sw.add_argument("file", nargs="?", help="a recording other than the default")
+    sw.set_defaults(func=cmd_swipes)
+    rp = sub.add_parser("replay", help="replay recorded swipes: accuracy report, or compare settings with --sweep")
+    rp.add_argument("file", nargs="?", help="a recording (default: the one in ~/.config/swipepen)")
+    rp.add_argument("--lang", default="en")
+    rp.add_argument("--looseness", type=float, help="swipe tolerance 0..1 (default: your setting)")
+    rp.add_argument("--ys", type=float, help="key height / width (default: what was recorded)")
+    rp.add_argument("--set", action="append", metavar="NAME=VALUE",
+                    help="override a decoder setting, e.g. prior_weight=0.2 (repeatable)")
+    rp.add_argument("--sweep", metavar="NAME=V1,V2,...", help="try several values of one setting, e.g. looseness=0,0.5,1")
+    rp.add_argument("--explicit-only", action="store_true", help="only swipes whose word you fixed or confirmed")
+    rp.add_argument("--limit", type=int, help="only the newest N swipes")
+    rp.set_defaults(func=cmd_replay)
+
+    ng = sub.add_parser("build-ngrams", help="make a word-pair table from text you choose, for better next-word suggestions")
+    ng.add_argument("paths", nargs="+", help="text files or folders (.txt .md .html .docx)")
+    ng.add_argument("--out", help="where to save (default: your swipepen folder, used automatically)")
+    ng.add_argument("--lang", default="en")
+    ng.add_argument("--top", type=int, default=8, help="followers kept per word (default 8)")
+    ng.add_argument("--min-count", type=int, default=3, help="a pair must be seen this often (default 3)")
+    ng.add_argument("--evaluate", action="store_true", help="first measure it on 10%% of the text held back")
+    ng.set_defaults(func=cmd_build_ngrams)
 
     up = sub.add_parser("update", help="install the newest swipepen*.tar.gz from your Downloads folder")
     up.add_argument("archive", nargs="?", help="a specific .tar.gz (default: newest in Downloads)")

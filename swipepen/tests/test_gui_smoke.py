@@ -224,13 +224,136 @@ app3._on_predict()
 check("next-word checkbox switches suggestions off", sess3.predict is False)
 sess3.get_predictor().path = None
 app3._forget_phrases()
-check("forget button clears what was learned", sess3.message == "forgot learned phrases")
+check("forget button clears what was learned", sess3.message == "forgot learned phrases and fixes")
 app3._save()
 check("looseness / prediction settings are remembered", load_config()["looseness"] == 0.8 and load_config()["predict"] is False)
 app3._on_docs_delay(0.4)
 check("Docs pause slider reaches the session", abs(sess3.docs_delay - 0.4) < 1e-9)
 app3._save()
 check("Docs settings are remembered", load_config()["docs_delay"] == 0.4 and load_config()["docs_menu_key"] == "ctrl+shift+\\")
+# --- stage 4 (0.7): swipe trail, key highlights, break reminders, pressure ------------------------------------------
+import time as _time
+for name in ("trail_var", "hilite_var", "press_var"):         # tk is mocked: give each switch its own value
+    setattr(app3, name, mock.MagicMock()); getattr(app3, name).get.return_value = True
+app3._on_resize(types.SimpleNamespace(width=500, height=250))      # 50 px per key
+app3.s.layer = "letters"; app3.s.panel = None
+c3 = app3.canvas
+def fills(method): return [call.kwargs.get("fill") for call in getattr(c3, method).call_args_list]
+def px(x, y): return types.SimpleNamespace(x=x * app3.S + app3.ox, y=(y + 1) * app3.S * app3.ka + app3.oy)
+
+c3.reset_mock()
+app3._mouse("hover", px(6.0, 1.5)); app3._redraw()
+check("hovering over a key lights it (and redraws its label)",
+      "#5b93e6" in fills("create_rectangle") and any(call.kwargs.get("text") == "h" for call in c3.create_text.call_args_list))
+
+app3._mouse("down", px(1.0, 1.5))
+for x in (2.0, 3.0, 4.0, 5.0, 6.0): app3._mouse("move", px(x, 1.5))
+c3.reset_mock(); app3._redraw()
+lines = c3.create_line.call_args_list
+check("a stroke in progress draws a trail made of several pieces", len(lines) >= 2, len(lines))
+check("older pieces are dimmer than the newest", len({call.kwargs["fill"] for call in lines}) >= 2 and lines[-1].kwargs["fill"] == "#ffb454", [call.kwargs["fill"] for call in lines])
+check("the trail pieces are smooth and rounded", all(call.kwargs.get("smooth") and call.kwargs.get("capstyle") == "round" for call in lines))
+check("keys passed over are tinted", "#2f4f86" in fills("create_rectangle"), set(fills("create_rectangle")))
+check("only a few canvas items for the trail (cheap to redraw)", len(lines) <= 10)
+
+app3._mouse("up", px(6.0, 1.5))
+c3.reset_mock(); app3._redraw()
+check("after pen-up the finished path lingers and fades (ghost)", len(c3.create_line.call_args_list) >= 1 and app3.fx.ghost is not None)
+app3.fx.ghost = (app3.fx.ghost[0], _time.time() - 0.3)             # part-way through the fade
+c3.reset_mock(); app3._redraw()
+check("...getting dimmer as it fades", 0 < len(c3.create_line.call_args_list) and c3.create_line.call_args_list[-1].kwargs["fill"] != "#ffb454", [call.kwargs["fill"] for call in c3.create_line.call_args_list])
+app3.fx.ghost = (app3.fx.ghost[0], _time.time() - 5)
+c3.reset_mock(); app3._redraw()
+check("...and is gone after a moment", len(c3.create_line.call_args_list) == 0)
+
+app3.trail_var.get.return_value = False
+app3._mouse("down", px(1.0, 1.5)); app3._mouse("move", px(3.0, 1.5)); app3._mouse("move", px(5.0, 1.5))
+c3.reset_mock(); app3._redraw()
+check("trail switched off: no trail drawn", len(c3.create_line.call_args_list) == 0)
+app3._mouse("up", px(5.0, 1.5))
+app3.trail_var.get.return_value = True
+
+app3.hilite_var.get.return_value = False
+c3.reset_mock(); app3._mouse("hover", px(6.0, 1.5)); app3._redraw()
+check("highlights switched off: nothing is lit", "#5b93e6" not in fills("create_rectangle") and "#2f4f86" not in fills("create_rectangle"))
+app3.hilite_var.get.return_value = True
+app3._on_hilite()
+check("the highlight switch reaches the tracker", app3.fx.track_keys is True)
+
+# panels: the box under the pen is lit
+app3.s.open_tools(); c3.reset_mock()
+b = next(b for b in app3.s.panel.layout() if b.text.startswith("Dictionary"))
+app3._mouse("hover", px((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2)); app3._redraw()
+check("a tappable panel box under the pen is lit", fills("create_rectangle").count("#5b93e6") == 1, fills("create_rectangle").count("#5b93e6"))
+app3.s.close_panel()
+
+# pressure colours the pen cursor
+app3.s.pressure.enabled, app3.s.pressure.limit = True, 0.6
+app3._mouse("down", px(5.0, 1.5)); app3.s.set_pressure(0.9)
+c3.reset_mock(); app3._redraw()
+oval = c3.create_oval.call_args_list[-1].kwargs
+check("pressing hard turns the pen cursor red", oval["outline"] == "#ff4040" and oval["fill"] == "#ff4040", oval)
+app3.s.pressure.abandon(); app3.s.set_pressure(0.12)
+c3.reset_mock(); app3._redraw()
+oval = c3.create_oval.call_args_list[-1].kwargs
+check("a light touch keeps it pale", oval["outline"] not in ("#ff4040", "#ff5c5c") and oval["outline"].startswith("#ff"), oval)
+app3.s.pressure.enabled = False
+c3.reset_mock(); app3._redraw()
+check("pressure hint off: the cursor stays the normal red", c3.create_oval.call_args_list[-1].kwargs["outline"] == "#ff5c5c")
+app3.s.pressure.enabled = True
+app3._mouse("up", px(5.0, 1.5))
+
+# the "lighter touch" hint
+app3.s.show_hint("lighter touch is enough"); c3.reset_mock(); app3._redraw()
+check("the hint is written over the strip", any(call.kwargs.get("text") == "lighter touch is enough" for call in c3.create_text.call_args_list))
+app3.s.hint_until = 0; c3.reset_mock(); app3._redraw()
+check("...and goes away", not any(call.kwargs.get("text") == "lighter touch is enough" for call in c3.create_text.call_args_list))
+
+# settings: break reminders, pressure, trail
+app3.open_settings()
+check("settings have the new controls", all(hasattr(app3, a) for a in ("break_scale", "plimit_scale", "well_label")))
+app3._on_break(45); app3._on_plimit(70)
+app3.press_var.get.return_value = False; app3._on_press()
+app3.trail_var.get.return_value = False; app3._on_trail()
+app3.hilite_var.get.return_value = False; app3._on_hilite()
+app3._save(); cfg = load_config()
+check("break interval reaches the session and the config file", sess3.well.break_minutes == 45 and cfg["break_minutes"] == 45, cfg["break_minutes"])
+check("pressure level reaches the session and the config file", abs(sess3.pressure.limit - 0.7) < 1e-9 and abs(cfg["pressure_limit"] - 0.7) < 1e-9)
+check("the pressure hint switch is remembered", sess3.pressure.enabled is False and cfg["pressure_hint"] is False)
+check("trail and highlight switches are remembered", cfg["show_trail"] is False and cfg["highlight_keys"] is False)
+check("switching the trail off clears what was on screen", app3.fx.pts == [] and app3.fx.ghost is None)
+app3.trail_var.get.return_value = True; app3.hilite_var.get.return_value = True; app3.press_var.get.return_value = True
+app3._on_trail(); app3._on_hilite(); app3._on_press()
+
+# a change made in the tools panel moves the slider (without feeding back)
+app3.break_scale.set.reset_mock()
+sess3.set_setting("break_minutes", 0)
+check("a setting changed from the pen's tools panel moves the slider", app3.break_scale.set.call_args.args == (0,), app3.break_scale.set.call_args)
+check("...without a feedback loop", app3._syncing is False and sess3.well.break_minutes == 0)
+app3._on_break(30)
+check("the slider works again afterwards", sess3.well.break_minutes == 30)
+
+# the settings window shows the stroke count
+app3.well_label.configure.reset_mock(); app3._well_text = None
+app3._redraw()
+check("the settings window shows today's strokes", any("Strokes today" in str(call.kwargs.get("text", "")) for call in app3.well_label.configure.call_args_list))
+sess3.well.stroke(); sess3.well.stroke()
+app3._redraw()
+check("...and the count follows", f"Strokes today: {sess3.well.today_strokes}" in app3._well_text, app3._well_text)
+app3._reset_strokes()
+check("the reset button clears today's count", sess3.well.today_strokes == 0 and sess3.message == "stroke count reset")
+
+# a break reminder is drawn like any panel
+sess3.well.set_break_minutes(1); sess3.well.active_s = 90; sess3.well.last_t = sess3.clock() - 5
+sess3.tick(); app3._redraw()
+check("a due break opens its panel in the window", getattr(sess3.panel, "is_break", False))
+sess3.close_panel()
+
+# the usage file is written next to the config, with counts only
+app3.s.flush()
+usage = os.path.join(os.path.dirname(config_path()), "usage.json")
+check("the daily counts are saved when the window closes", os.path.exists(usage) and "days" in open(usage).read())
+check("...and only counts (no text, no times of day)", set(__import__("json").load(open(usage))) == {"days"})
 app3.close()
 check("closing saves what was learned", True)
 print("\nAll GUI smoke tests passed.")

@@ -5,6 +5,7 @@ import re
 
 from . import checker
 from .panel import Cell, Panel, lines, word_rows
+from .wellbeing import SNOOZE_MINUTES
 
 WORD_RE = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)*")
 
@@ -36,7 +37,17 @@ class ToolsPanel(Panel):
             toggle("predict", "Suggest the next word", s.predict),
             toggle("autofix", "Fix typos as I type", s.autofix),
             toggle("typewriter", "Keep the cursor level", s.typewriter),
+            self._break_row(),
+            toggle("pressure_hint", "Lighter-touch hint", s.pressure.enabled),
+            [Cell(s.well.summary(), None, "dim")],
         ]
+
+    def _break_row(self):
+        s = self.s
+        on = s.well.break_minutes > 0
+        label = f"Break reminders: every {s.well.break_minutes} min" if on else "Break reminders: off"
+        return [Cell(label, lambda: self._toggle("break_minutes", 0 if on else s.well.toggle_minutes),
+                     "on" if on else "item")]
 
     def _then(self, fn):
         def go():
@@ -46,6 +57,46 @@ class ToolsPanel(Panel):
 
     def _toggle(self, name, value):
         self.s.set_setting(name, value)
+
+
+# --------------------------------------------------------------------------------------------
+class BreakPanel(Panel):
+    """The break reminder: rest now, snooze, or skip. It only appears between strokes (see Session._break_check)."""
+    is_break = True
+
+    def __init__(self, session):
+        super().__init__(session)
+        w = session.well
+        self.tabs = [f"{w.work_minutes()} min of writing, {w.today_strokes} strokes today"]
+        self.decided = False
+
+    def rows(self):
+        w = self.s.well
+        return [
+            [Cell("Take a break now", self._take, "on")],
+            [Cell(f"Remind me in {SNOOZE_MINUTES} minutes", self._snooze)],
+            [Cell(f"Skip this one (next in {w.break_minutes} min)", self._skip)],
+        ] + lines("Put the pen down. Open and close your hands slowly and roll your wrists.", "dim")
+
+    def _take(self):
+        self.decided = True
+        self.s.well.take_break()
+        self.s.message = "rest well"
+        self.s.close_panel()
+
+    def _snooze(self):
+        self.decided = True
+        self.s.well.snooze(SNOOZE_MINUTES)
+        self.s.close_panel()
+
+    def _skip(self):
+        self.decided = True
+        self.s.well.skip()
+        self.s.close_panel()
+
+    def on_close(self):
+        if not self.decided and self.s.well.due():       # closed without choosing: ask again soon
+            self.s.well.snooze(5)
 
 
 # --------------------------------------------------------------------------------------------

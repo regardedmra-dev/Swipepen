@@ -155,6 +155,29 @@ backspace and typing (so formatting stays), and leaves the caret where it was.
   about 3 times out of 4 (the old decoder found almost none); full swipes are as accurate as before, to within a point or two at high noise.
   Loose settings trade a little precision on very sloppy full swipes for better completions.
 
+### Accuracy tools (new in 0.6)
+
+**Learns from your fixes.** When you tap another word in the strip, or erase a word and swipe it again, swipepen counts it.
+Next time those two words compete, the one you meant gets a small push (capped: it reorders close calls, it never overrules
+a clear swipe). Kept on this computer in `~/.config/swipepen/corrections.json`. Switch off or wipe it in Settings.
+
+**Save my swipes (off by default).** Settings -> *Save my swipes on this computer*. Every swipe goes into
+`~/.config/swipepen/swipes.jsonl`: the pen path, the words offered, the three words before it, and what you did next (kept it,
+picked another word, erased it). That is text you wrote, so switch it off for anything private; it never leaves your computer.
+`swipepen swipes info` shows its size, `swipepen swipes clear` (or the Settings button) deletes it.
+
+**Measure and tune.** `swipepen replay` runs your recorded swipes through the decoder again and reports top-1 / top-3 / top-5,
+split into *explicit* swipes (you fixed or confirmed the word: known for sure) and *implicit* ones (you just carried on). Compare
+settings on your own hand: `swipepen replay --sweep looseness=0,0.25,0.5,0.75,1`, or any decoder number, e.g.
+`--sweep prior_weight=0.1,0.18,0.26` or `--set coverage_weight=0.3`. Only the shape decoder is replayed; the report also shows how
+often the word was right *as typed* live (which includes the word-before and corrections nudges). Needs a few hundred swipes to say much.
+
+**A stronger next-word list from text you choose.** swipepen ships no word-pair table (it would only be as good, and as free to
+use, as the text behind it). Make one from your own writing, or any text you may use:
+`swipepen build-ngrams ~/Documents/writing/ --evaluate` reads .txt, .md, .html and .docx (Google Docs: *File -> Download*), holds back
+10% of the sentences and prints how often the right word was among the three suggestions with and without the table, then saves it to
+`~/.config/swipepen/bigrams_en.tsv.gz`. Restart swipepen to use it. What you write yourself still counts more than the table.
+
 ### Tools: dictionary, paragraph check, Google Docs' own check
 
 The fourth cell of the idle suggestion strip (**more**, or **⋯** while it shows predictions; or right-click the keyboard -> *Tools*) opens a screen over the keyboard that you
@@ -193,6 +216,28 @@ so it counts: lines of text from the characters typed. Two sliders in Settings c
 adjust the slider, repeat. The wheel acts on the window under the **mouse pointer**, so keep the pointer over the document (the pen does not move it).
 It drifts a little over a long time (it is an estimate); scroll by hand whenever you like.
 
+### Seeing what the pen does, and looking after your hand (new in 0.7)
+
+**Swipe trail and lit keys.** While you swipe, the whole path stays on the keyboard, older parts dimmer and thinner than the part
+near the pen. When you lift the pen the finished path lingers for a moment and fades. The key under the pen is lit, and so are the
+letters the stroke has passed over (the ones the decoder is looking at). On the pen screens the box under the pen is lit too.
+Both can be switched off in Settings.
+
+**Pressure hint.** The pen cursor turns from pale yellow to red (and grows a little) the harder you press. If you press hard on four
+strokes in a row, the strip says *lighter touch is enough* (at most once every 90 seconds). *Settings -> Counts as pressing hard
+from* sets the level as a share of what your pen can report (default 60%); the switch is also in the Tools screen.
+Pens that do not report pressure simply never show it.
+
+**Break reminders.** swipepen counts the time you spend writing: the time between finished strokes, where a pause counts for at most
+20 seconds (thinking) and a pause of 3 minutes or more is a real rest that starts the count over. After 30 minutes of writing
+(Settings: 0 to 90 minutes, 0 = never; also a switch in the Tools screen) a small screen appears, but only once the pen has been still
+for a moment, so never in the middle of a word: *Take a break now*, *Remind me in 10 minutes* or *Skip this one*. Closing it without
+choosing asks again in 5 minutes, and it closes by itself if you walk away and rest.
+
+**Stroke counter.** Every finished stroke (tap, swipe, gesture) is counted. The Tools screen and the Settings window show today's
+count, yesterday's, and how long you have been writing since a rest. Only the daily totals are kept, in
+`~/.config/swipepen/usage.json` (no text, no times of day); *Reset today's stroke count* in Settings clears today.
+
 ### The keyboard window and settings
 
 The window shows **only the keyboard**, nothing else:
@@ -212,6 +257,7 @@ menu) and stay out of the way otherwise:
   Gboard, so the hand travels less sideways. The decoder measures swipes in real distance, so accuracy is not hurt.
   Choose 1.0 for square keys.
 - **Cursor speed** (0.3x to 3x): how fast the caret runs when you hold the pen at the edge of the keyboard after a space-bar swipe.
+- **Swipe trail**, **lit keys**, **break reminders**, **pressure hint** and its level, today's **stroke count** (see above).
 - **Fix typos as I type** and **My words** (see above).
 - **Keep the cursor level** with its two calibration sliders and a test button (see above).
 - **Rotation**: *Left-handed (rotate 180°)* if your tablet is turned the other way (90° and 270° exist too).
@@ -240,9 +286,11 @@ the right-click menu or to click your Google Docs tab) and never move the keyboa
 | `--size PCT` | keyboard size on the tablet, % of its width (default 50) |
 | `--scale PX` | size of the preview keyboard on screen, pixels per key (default 60) |
 | `--layout us/es/latam` | your active layout; only changes the apostrophe key |
-| `--record swipes.jsonl` | log every swipe and your corrections, to tune the decoder |
+| `--record swipes.jsonl` | save swipes to this file for this run (the same recording as Settings -> *Save my swipes*, other file) |
 | `--dry-run`, `--no-pen`, `--mouse` | testing without typing / without a pen |
 | `--start-paused` | start with the pen released |
+
+More commands: `swipepen replay`, `swipepen swipes info|path|clear`, `swipepen build-ngrams PATHS`, see *Accuracy tools*.
 
 Add your own words (names, jargon): one per line in `~/.config/swipepen/words.txt` (they get a frequency boost).
 
@@ -262,6 +310,10 @@ PYTHONPATH=.:tests python3 tests/test_lookup.py    # dictionary (a tiny WordNet-
 PYTHONPATH=.:tests python3 tests/test_checker.py   # paragraph check: grammar rules, spelling, LanguageTool (fake server)
 PYTHONPATH=.:tests python3 tests/test_panels.py    # pen screens: tools, dictionary, paragraph check, Docs keys
 PYTHONPATH=.:tests python3 tests/test_predict.py   # next-word strip, completions, learning, unfinished swipes, looseness
+PYTHONPATH=.:tests python3 tests/test_recorder.py  # swipe recorder, labels, learning from fixes, replay / sweep
+PYTHONPATH=.:tests python3 tests/test_ngrams.py    # word-pair table: build, load, predictor, hold-out evaluation
+PYTHONPATH=.:tests python3 tests/test_trailfx.py   # swipe trail fading, lit keys (logic only, no Tk)
+PYTHONPATH=.:tests python3 tests/test_wellbeing.py # stroke counter, break reminders, pressure hint, new settings
 ```
 
 Synthetic results (offline word list, so frequency priors are rough; see caveats):
@@ -272,7 +324,7 @@ Synthetic results (offline word list, so frequency priors are rough; see caveats
 | medium (0.30 key) | 82% | 94% | 96% |
 | high (0.45 key) | 56% | 76% | 81% |
 
-## Honest status (v0.5)
+## Honest status (v0.7)
 
 - The decoder and typing logic are tested. **The Tk window and real Wacom/uinput behaviour have not been run on actual hardware** - expect some first-run fixes. Run `devices` and the mouse test first.
 - English and US-style letter positions only. Accented letters (á, é, ñ...) are not typed yet; Spanish needs a Spanish word list plus an input method for accents (planned).
@@ -290,7 +342,15 @@ Synthetic results (offline word list, so frequency priors are rough; see caveats
 - New in 0.5, tested on synthetic swipes and fakes only: the built-in next-word list is hand-written and modest (it will suggest
   plausible but plain words until it has learned you), and the unfinished-swipe decoder takes a bit longer per swipe (about 0.1 s here with a
   62,000-word list). If a short word you swipe in full keeps turning into a longer one, move *Swipe tolerance* toward strict.
-- Typing is blind-ish: expect a learning period. Your own `--record` data is the best way to tune the decoder to your hand.
+- New in 0.6, tested on synthetic swipes and fakes only: the recorder, `replay`, learning from fixes and `build-ngrams`. Nothing has
+  been recorded from a real hand yet, so no real-hand accuracy number exists; the synthetic table above is still the only one. The
+  fix-learning thresholds (how close two paths must be to count as "swiped it again": 1.0 key; within 12 s) are first guesses: if
+  `replay` shows wrong labels on your recording, tell me. No word-pair table is bundled, so suggestions stay modest until you build one.
+- New in 0.7, tested against fakes only (mock Tk, a fake evdev pen, a fake clock): the trail, key highlights, break reminders, stroke
+  counter and pressure hint. How they *look* in the real window (colours, trail thickness, whether lit keys feel helpful or
+  distracting) has not been seen on a screen. The pressure level (60%) and "four hard strokes in a row" are guesses: pens differ, so tune
+  the slider to your Bamboo. The work-timer numbers (a pause counts up to 20 s, 3 minutes is a rest) are also first guesses.
+- Typing is blind-ish: expect a learning period. Turn on *Save my swipes* for a week, then `swipepen replay --sweep looseness=...` is the way to tune the decoder to your hand.
 - Glide-typing is a typing aid, not a handwriting recognizer. If you actually want to *write letters by hand*, that is a different tool.
 
 ## Manual install (only if ./install.sh does not suit you)
